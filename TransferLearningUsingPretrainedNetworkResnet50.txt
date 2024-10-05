@@ -1,0 +1,93 @@
+%% Transfer Learning Using Pretrained ResNet50 Network To Classify the ECG
+
+%% Load Data
+digitDatasetPath = fullfile(pwd,'Dataset\ECG_Images_Croped\Train');
+imdsTrain = imageDatastore(digitDatasetPath, ...
+    'IncludeSubfolders',true, ...
+    'LabelSource','foldernames');
+
+digitDatasetPath = fullfile(pwd,'Dataset\ECG_Images_Croped\Validation');
+imdsValidation = imageDatastore(digitDatasetPath, ...
+    'IncludeSubfolders',true, ...
+    'LabelSource','foldernames');
+
+%% Load Pretrained Network
+net = resnet50;
+
+%% The first layer, which is the image input layer, requires input images of size 
+inputSize = net.Layers(1).InputSize;
+
+% [imdsTrain,imdsValidation] = splitEachLabel(imds,0.7,'randomized');
+%% Display some sample images.
+numTrainImages = numel(imdsTrain.Labels);
+idx = randperm(numTrainImages,16);
+figure
+for i = 1:16
+    subplot(4,4,i)
+    I = readimage(imdsTrain,idx(i));
+    imshow(I)
+end
+
+%% Use |deepNetworkDesigner| to display an interactive visualization of the network 
+% architecture and detailed information about the network layers.
+deepNetworkDesigner(net)
+
+%% Replace Final Layers
+% Extract the layer graph from the trained network.
+lgraph = layerGraph(net); 
+% Replace the fully connected layer with a new fully connected layer 
+numClasses = numel(categories(imdsTrain.Labels))
+newLearnableLayer = fullyConnectedLayer(numClasses, ...
+    'Name','new_fc', ...
+    'WeightLearnRateFactor',10, ...
+    'BiasLearnRateFactor',10);
+lgraph = replaceLayer(lgraph,'fc1000',newLearnableLayer);
+
+%% The classification layer specifies the output classes of the network. Replace 
+% the classification layer with a new one without class labels. 
+newClassLayer = classificationLayer('Name','new_classoutput');
+lgraph = replaceLayer(lgraph,'ClassificationLayer_fc1000',newClassLayer);
+
+%% Train Network
+% First, apply data augmentation
+augimdsTrain = augmentedImageDatastore(inputSize(1:2),imdsTrain);
+augimdsValidation = augmentedImageDatastore(inputSize(1:2),imdsValidation);
+% Second, determine the training options 
+options = trainingOptions('sgdm', ...
+    'MiniBatchSize',50, ...
+    'MaxEpochs',3, ...
+    'InitialLearnRate',1e-4, ...
+    'Shuffle','every-epoch', ...
+    'ValidationData',augimdsValidation, ...
+    'ValidationFrequency',50, ...
+    'Verbose',true, ...
+    'Plots','training-progress');
+% Third, train the network to the new data (ECG images)
+netTransfer = trainNetwork(augimdsTrain,lgraph,options);
+
+save("Resnet50_ECG_3Epochs.mat","options","netTransfer")
+
+%% Classify Validation Images
+% Classify the validation images using the fine-tuned network.
+[YPred,scores] = classify(netTransfer,augimdsValidation);
+
+%% Display four sample validation images with their predicted labels.
+idx = randperm(numel(imdsValidation.Files),16);
+figure
+for i = 1:16
+    subplot(4,4,i)
+    I = readimage(imdsValidation,idx(i));
+    label = YPred(idx(i));
+    imshow(I)
+    if label == imdsValidation.Labels(idx(i))
+        colorText = 'g';
+    else
+        colorText = 'r';
+    end
+    title(char(label),'Color',colorText)
+end
+
+%% Calculate the classification accuracy on the validation set. Accuracy is the 
+% fraction of labels that the network predicts correctly.
+YValidation = imdsValidation.Labels;
+accuracy = mean(YPred == YValidation)
